@@ -100,11 +100,19 @@
 #' @export cpAlgorithm
 
 cpAlgorithm <- function(W, k, method = c("unweighted","weighted","weighted.CFinder"), I){
-  
   ###error message if W is not a qgraph object
   if (methods::is(W, "qgraph") == FALSE) {
     stop("W (network object) must be a qgraph object.")
   }
+  
+  #extract weights matrix
+  Wmat <- qgraph::getWmat(W)
+  labels <- as.vector(W$graphAttributes$Nodes$labels)
+
+  return(cpAlgorithmRaw(Wmat, k, method, I, labels, all_k_cliques = NULL))
+}
+
+cpAlgorithmRaw <- function(Wmat, k, method = c("unweighted","weighted","weighted.CFinder"), I, labels = NULL, all_k_cliques = NULL) {
   ###error message if k is not larger than 2
   if (k < 3) {
     stop("k must be larger than 2, because this is the first reasonable clique size.")
@@ -129,82 +137,13 @@ cpAlgorithm <- function(W, k, method = c("unweighted","weighted","weighted.CFind
   ## }
   
   
-  ###function to determine list of cliques for weighted networks
-  weighted <- function(W_weighted){
-    
-    #take absolute Value of weights matrix
-    #deals with negative edges such that they are simply considered like positive edges
-    W_weighted <- abs(W_weighted)
-    
-    #transform to igraph object to use specific functions
-    W_i_weighted <- igraph::graph_from_adjacency_matrix(W_weighted,
-                                                        mode = "undirected", weighted = TRUE)
-    
-    #extract cliques
-    cliques_weighted <- igraph::cliques(W_i_weighted, min = k, max = k) %>% lapply(as.vector)
-    
-    #if there are cliques...(if there are no cliques, nothing needs to be done because cliques_weighted is empty)
-    #check whether cliques exceed Intensity
-    #first step is to create a list of intensity with each vector being the intensity of corresponding clique
-    #this is achieved by extracting the weights for every pair of nodes in each clique from weights matrix
-    #the vector with the weights is then used to calculate the intensity of the respective clique
-    #second step is to create a list that has TRUE at corresponding position if clique intensity exceeds set Intensity
-    #finally, select only cliques that should be included
-    ## intensity_weighted <- list()
-    intensity_weighted <- vector("list",length(cliques_weighted))
-    if (length(cliques_weighted) > 0) {
-      for (i in 1:length(cliques_weighted)) {
-        ## weights <- c()
-        weights <- numeric( (length(cliques_weighted[[i]])-1) * (length(cliques_weighted[[i]])) / 2 )
-        m <- 1
-        for (j in 1:(length(cliques_weighted[[i]]) - 1)) {
-          for (k in (j+1):length(cliques_weighted[[i]])) {
-            weights[m] <- W_weighted[cliques_weighted[[i]][j],cliques_weighted[[i]][k]]
-            m <- m + 1
-          }
-        }
-        exponent <- 2/(length(cliques_weighted[[i]]) * (length(cliques_weighted[[i]]) - 1))
-        intensity_weighted[[i]] <- prod(weights)^exponent
-      }
-      cliques_include_weighted <- lapply(intensity_weighted, function(x) as.numeric(as.character(x)) > I)
-      cliques_weighted <- cliques_weighted[which(cliques_include_weighted == TRUE)]
-    }
-    
-    #return cliques
-    return(cliques_weighted)
-    
-  }
-  
   #function to derive communities, shared nodes, and isolated nodes
-  results_cp <- function(W, cliques, labels){
+  results_cp <- function(Wmat, cliques, labels){
     
     #loop to compare all cliques with each other
     #if cliques share k-1 nodes, a vector is created stating their indices
                                         #if there are not at least two cliques, there can be no edge; thus, the edge list is empty
-    if (length(cliques) > 1) {
-
-      ## library(Rcpp)
-      ## sourceCpp("~/RP/FasterCliquePercolation/src/code.cpp")
-      ## r1=create_edges_matrix_intersect(cliques)
-      ## r2=create_edges_matrix_setdiff(cliques)
-      ## r3=create_edges_matrix_custom(cliques)
-      ## identical(r1,r2)
-      ## identical(r1,r3)
-      ## library(microbenchmark)
-      ## microbenchmark(#r1=create_edges_matrix_intersect(cliques),
-      ##                r2=create_edges_matrix_setdiff(cliques),
-      ##                r3=create_edges_matrix_custom(cliques),  ## custom wins! by about 4x :)
-      ##                times=10) # marginally faster
-      ## system.time(create_edges_matrix_intersect(cliques))
-      ## system.time(create_edges_matrix_setdiff(cliques))
-
-      edges=create_edges_matrix_custom(cliques)
-    } else {
-      ## edges <- list()
-      edges <- matrix(0,2,0)
-    }
-
-                                        #CFinder applies the Intensity threshold twice, once for the cliques and once for the overlap of cliques
+    #CFinder applies the Intensity threshold twice, once for the cliques and once for the overlap of cliques
     #this is not stated in the paper, but to increase comparability, this is also implemented here for method = weighted.CFinder
     #each k-1 set of nodes coded by an edge is taken and this subnetwork is again tested against I
     #each subnetwork coded by an edge is excluded, when it does not exceed I
@@ -222,40 +161,17 @@ cpAlgorithm <- function(W, k, method = c("unweighted","weighted","weighted.CFind
     ##   edges <- edges[which(edges_include_weighted == TRUE)]
     ## }
     
-    #if there is more than one clique and at least one edge...
-    #create list of vectors with each vector being a community; this has a number of steps
-    #a weights matrix is created with cliques as nodes and existence of k-adjacency between them as edge
-    #then, components (connected subgraphs) of this graph are extracted from igraph object
-    #components are therefore the communities
-    #each clique is then put into its respective community and the nodes of each community are extracted
-    if (length(cliques) > 1 & length(edges) > 0) {
-      W_comm <- matrix(c(0), nrow = length(cliques), ncol = length(cliques))
-      ## edges_i=sapply(edges,"[",1)
-      ## edges_j=sapply(edges,"[",2)
-      W_comm[ t(edges) ]=1
-      ## for (i in 1:length(edges)) {
-      ##   W_comm[edges[[i]][1],edges[[i]][2]] <- 1
-      ## }
-      W_i_comm <- igraph::graph_from_adjacency_matrix(W_comm, mode = "upper")
-      members <- igraph::components(W_i_comm)$membership
-      split <- split(cliques, members)
-      communities <- lapply(split, function(x) sort(unique(unlist(x))))
-    }
-    #if there is at least one clique but no edge...
-    #communities are the existing cliques
-    if (length(cliques) > 0 & ncol(edges) == 0) {
-      communities <- cliques
-    }
-    #if there are no cliques (and therefore also no edges)...
-    #communities list is empty
-    if (length(cliques) == 0) {
+    if (length(cliques) > 1) {
+      communities = calculate_community_membership(cliques, nrow(Wmat))
+    } else {
+      #communities list is empty
       communities <- list() 
     }
     
     #create vector of nodes that do not belong to a community
     #if there are no isolated nodes, create empty variable
-    isolated <- subset(1:nrow(W),
-                       subset = !(1:nrow(W)%in%unique(unlist(communities))))
+    isolated <- subset(1:nrow(Wmat),
+                       subset = !(1:nrow(Wmat)%in%unique(unlist(communities))))
     if (length(isolated) == 0) {isolated <-  c()}
     
     #if there is more than one community...
@@ -311,10 +227,6 @@ cpAlgorithm <- function(W, k, method = c("unweighted","weighted","weighted.CFind
                 isolated,isolated_labels))
   }
   
-  #extract weights matrix
-  Wmat <- qgraph::getWmat(W)
-  labels <- as.vector(W$graphAttributes$Nodes$labels)
-  
   #run corresponding functions for respective method
   
   ## if (method == "unweighted") {
@@ -331,8 +243,17 @@ cpAlgorithm <- function(W, k, method = c("unweighted","weighted","weighted.CFind
     if (I <= 0) {
       stop("Intensity (I) must be larger than zero.\nThis is because all edges are considered positive.\nComparing intensities of cliques or their overlap to zero or negative value therefore makes no sense.")
     }
-    cliques <- weighted(Wmat)
-    results_weighted <- results_cp(Wmat, cliques, labels)
+
+    # First find all cliques (if not provided as an argument), with their associated intensities
+    if (is.null(all_k_cliques)) {
+        all_k_cliques <- calculate_all_clique_intensities(Wmat, k)
+    }
+
+    # Restrict to cliques above this threshold
+    cliques_above_thresh <- threshold_cliques(all_k_cliques, I)$cliques
+
+    # Run algorithm (i.e. find communities)
+    results_weighted <- results_cp(Wmat, cliques_above_thresh, labels)
     names(results_weighted) <- c("list.of.communities.numbers","list.of.communities.labels",
                                  "shared.nodes.numbers","shared.nodes.labels",
                                  "isolated.nodes.numbers","isolated.nodes.labels")
@@ -340,3 +261,50 @@ cpAlgorithm <- function(W, k, method = c("unweighted","weighted","weighted.CFind
   }
   
 }
+
+threshold_cliques <- function(cliques_result, I) {
+  include_clique <- lapply(cliques_result$intensity_weighted, function(x) as.numeric(as.character(x)) > I)
+  cliques_weighted_thr <- cliques_result$cliques[which(include_clique == TRUE)]
+  intensity_weighted_thr <- cliques_result$intensity_weighted[which(include_clique == TRUE)]
+  return(list("intensity_weighted" = intensity_weighted_thr,
+              "cliques" = cliques_weighted_thr))
+}
+
+##function to find all cliques and calculate their intensities
+calculate_all_clique_intensities_raw <- function(W_weighted, k) {
+  #take absolute Value of weights matrix
+  #deals with negative edges such that they are simply considered like positive edges
+  W_weighted <- abs(W_weighted)
+
+  #transform to igraph object to use specific functions
+  W_i_weighted <- igraph::graph_from_adjacency_matrix(W_weighted,
+                                                      mode = "undirected", weighted = TRUE)
+
+  #extract cliques
+  cliques_weighted <- igraph::cliques(W_i_weighted, min = k, max = k) %>% lapply(as.vector)
+
+  intensity_weighted <- vector("list",length(cliques_weighted))
+  if (length(cliques_weighted) > 0) {
+    for (i in 1:length(cliques_weighted)) {
+      ## weights <- c()
+      weights <- numeric( (length(cliques_weighted[[i]])-1) * (length(cliques_weighted[[i]])) / 2 )
+      m <- 1
+      for (j in 1:(length(cliques_weighted[[i]]) - 1)) {
+        for (k in (j+1):length(cliques_weighted[[i]])) {
+          weights[m] <- W_weighted[cliques_weighted[[i]][j],cliques_weighted[[i]][k]]
+          m <- m + 1
+        }
+      }
+      exponent <- 2/(length(cliques_weighted[[i]]) * (length(cliques_weighted[[i]]) - 1))
+      intensity_weighted[[i]] <- prod(weights)^exponent
+    }
+  }
+
+  return(list("intensity_weighted" = intensity_weighted,
+              "cliques" = cliques_weighted))
+
+}
+
+# Use memoization to cache the results of this function call. Thus if the function is called
+# twice in a session with the same parameters, the second call will be almost instant.
+calculate_all_clique_intensities <- R.cache::addMemoization(calculate_all_clique_intensities_raw)
